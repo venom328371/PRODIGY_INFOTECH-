@@ -1,0 +1,229 @@
+"""
+Traffic accident analysis: patterns by weather, road condition, time-of-day,
+plus hotspot mapping and clustering.
+
+Usage:
+ - Place your CSV file (e.g. "accidents.csv") in the working folder.
+ - Run in a Jupyter notebook or script environment with required packages installed.
+
+Required packages:
+ pip install pandas numpy matplotlib seaborn folium scikit-learn geopandas contextily
+ (geopandas & contextily optional but recommended for spatial plotting)
+"""
+
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.cluster import DBSCAN
+import folium
+from folium.plugins import HeatMap
+from datetime import datetime
+
+# --------- CONFIG: file path and column mapping ----------
+CSV_PATH = "/mnt/data/accidents.csv"  # change to your file path
+
+# If your dataset uses different names, update this mapping:
+COL_MAPPINGS = {
+    "lat": ["latitude", "lat", "y", "LAT", "Latitude"],
+    "lon": ["longitude", "lon", "x", "LON", "Longitude"],
+    "datetime": ["date_time", "datetime", "crash_time", "date/time", "occurrence_time", "timestamp"],
+    "date": ["date"],
+    "time": ["time", "hour"],
+    "weather": ["weather", "weather_condition", "meteo", "precipitation"],
+    "road_cond": ["road_condition", "surface_condition", "road_surface"],
+    "severity": ["severity", "accident_severity", "casualty_severity"]
+}
+
+# --------- HELPER: load and auto-detect column names ----------
+def find_column(df, possible_names):
+    for name in possible_names:
+        if name in df.columns:
+            return name
+    return None
+
+# Load CSV
+if not os.path.exists(CSV_PATH):
+    raise FileNotFoundError(f"CSV not found at {CSV_PATH}. Update CSV_PATH variable.")
+
+df = pd.read_csv(CSV_PATH)
+print("Loaded", len(df), "rows. Columns:", list(df.columns)[:10], " ...")
+
+# Detect core columns
+lat_col = find_column(df, COL_MAPPINGS["lat"])
+lon_col = find_column(df, COL_MAPPINGS["lon"])
+datetime_col = find_column(df, COL_MAPPINGS["datetime"])
+date_col = find_column(df, COL_MAPPINGS["date"])
+time_col = find_column(df, COL_MAPPINGS["time"])
+weather_col = find_column(df, COL_MAPPINGS["weather"])
+road_cond_col = find_column(df, COL_MAPPINGS["road_cond"])
+severity_col = find_column(df, COL_MAPPINGS["severity"])
+
+print("Detected columns:")
+print(" lat:", lat_col, " lon:", lon_col, " datetime:", datetime_col)
+print(" date:", date_col, " time:", time_col, " weather:", weather_col, " road_cond:", road_cond_col, " severity:", severity_col)
+
+# ------------- Basic preprocessing -------------
+# Make a working copy
+df_work = df.copy()
+
+# Parse datetime
+if datetime_col:
+    df_work['dt'] = pd.to_datetime(df_work[datetime_col], errors='coerce')
+else:
+    # try combine date and time
+    if date_col and time_col:
+        df_work['dt'] = pd.to_datetime(df_work[date_col].astype(str) + ' ' + df_work[time_col].astype(str), errors='coerce')
+    elif date_col:
+        df_work['dt'] = pd.to_datetime(df_work[date_col], errors='coerce')
+    else:
+        df_work['dt'] = pd.NaT
+
+# Extract hour, day of week, month
+df_work['hour'] = df_work['dt'].dt.hour
+df_work['dayofweek'] = df_work['dt'].dt.day_name()
+df_work['date_only'] = df_work['dt'].dt.date
+
+# Clean weather and road condition columns (if present)
+if weather_col:
+    df_work['weather_clean'] = df_work[weather_col].astype(str).str.lower().str.strip()
+else:
+    df_work['weather_clean'] = "unknown"
+
+if road_cond_col:
+    df_work['road_cond_clean'] = df_work[road_cond_col].astype(str).str.lower().str.strip()
+else:
+    df_work['road_cond_clean'] = "unknown"
+
+# Keep only rows with coordinates if available
+if lat_col and lon_col:
+    df_work = df_work.dropna(subset=[lat_col, lon_col])
+    # convert floats
+    df_work[lat_col] = pd.to_numeric(df_work[lat_col], errors='coerce')
+    df_work[lon_col] = pd.to_numeric(df_work[lon_col], errors='coerce')
+    df_work = df_work.dropna(subset=[lat_col, lon_col])
+else:
+    print("No lat/lon columns detected — hotspot mapping will be disabled.")
+
+# ------------- Exploratory visualizations -------------
+sns.set(style="whitegrid")
+
+# 1) Time-of-day pattern (hourly counts)
+plt.figure(figsize=(10,5))
+hour_counts = df_work['hour'].value_counts().sort_index()
+sns.barplot(x=hour_counts.index, y=hour_counts.values)
+plt.xlabel("Hour of day")
+plt.ylabel("Number of accidents")
+plt.title("Accidents by hour of day")
+plt.xticks(range(0,24))
+plt.show()
+
+# 2) Day-of-week heatmap (hour vs weekday)
+pivot = pd.crosstab(df_work['hour'], df_work['dayofweek'])
+# Ensure consistent weekday order
+weekday_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+pivot = pivot[ [c for c in weekday_order if c in pivot.columns] ]
+plt.figure(figsize=(10,6))
+sns.heatmap(pivot, cmap="YlOrRd", linewidths=.5)
+plt.title("Accident counts: hour (rows) vs day of week (columns)")
+plt.xlabel("Day of week")
+plt.ylabel("Hour of day")
+plt.show()
+
+# 3) Weather effect
+if weather_col:
+    top_weather = df_work['weather_clean'].value_counts().nlargest(12)
+    plt.figure(figsize=(10,5))
+    sns.barplot(x=top_weather.values, y=top_weather.index)
+    plt.title("Top weather conditions in accident records")
+    plt.xlabel("Count")
+    plt.ylabel("Weather condition")
+    plt.show()
+else:
+    print("Weather column not found — skipping weather plot.")
+
+# 4) Road surface / condition effect
+if road_cond_col:
+    top_road = df_work['road_cond_clean'].value_counts().nlargest(12)
+    plt.figure(figsize=(10,5))
+    sns.barplot(x=top_road.values, y=top_road.index)
+    plt.title("Top road surface/condition entries in accident records")
+    plt.xlabel("Count")
+    plt.ylabel("Road condition")
+    plt.show()
+else:
+    print("Road condition column not found — skipping road condition plot.")
+
+# 5) Severity by hour (if severity available)
+if severity_col:
+    sev = df_work[[severity_col, 'hour']].dropna()
+    plt.figure(figsize=(12,6))
+    sns.countplot(data=sev, x='hour', hue=severity_col, dodge=True)
+    plt.title("Accident severity by hour")
+    plt.xlabel("Hour")
+    plt.ylabel("Count")
+    plt.show()
+else:
+    print("Severity column not found — skipping severity-by-hour plot.")
+
+# ----------- Hotspot mapping (folium) -----------
+if lat_col and lon_col:
+    # Create a base map centered on mean coords
+    center = [df_work[lat_col].mean(), df_work[lon_col].mean()]
+    m = folium.Map(location=center, zoom_start=11)
+
+    # HeatMap (latitude, longitude) — reduce points if dataset is huge
+    heat_data = list(zip(df_work[lat_col].tolist(), df_work[lon_col].tolist()))
+    HeatMap(heat_data, radius=8, blur=10, max_zoom=13).add_to(m)
+
+    # Save map to html
+    map_out = "accident_heatmap.html"
+    m.save(map_out)
+    print(f"Heatmap saved to {map_out}. Open it in a browser to explore hotspots.")
+
+    # --------- DBSCAN clustering to detect hotspot clusters ----------
+    coords = df_work[[lat_col, lon_col]].to_numpy()
+    # Convert degrees to radians for haversine if using that metric; here use meter-prox via eps in degrees
+    kms_per_radian = 6371.0088
+    # eps ~ 0.5 km => in degrees ~ 0.5/111 = 0.0045
+    db = DBSCAN(eps=0.0045, min_samples=20, metric='haversine', algorithm='ball_tree')
+    # Convert lat/lon to radians
+    coords_rad = np.radians(coords)
+    labels = db.fit_predict(coords_rad)
+    df_work['cluster'] = labels
+
+    # show top clusters
+    cluster_counts = df_work[df_work['cluster']!=-1]['cluster'].value_counts().nlargest(10)
+    print("Top clusters (label: count):")
+    print(cluster_counts)
+
+    # Add cluster centers to folium map
+    for cl in cluster_counts.index:
+        cluster_pts = df_work[df_work['cluster'] == cl]
+        center_lat = cluster_pts[lat_col].mean()
+        center_lon = cluster_pts[lon_col].mean()
+        folium.CircleMarker(location=[center_lat, center_lon],
+                            radius=8,
+                            color='blue',
+                            fill=True,
+                            fill_color='blue',
+                            popup=f"Cluster {cl}: {len(cluster_pts)} accidents").add_to(m)
+
+    # Save map with clusters
+    map_clusters_out = "accident_clusters_map.html"
+    m.save(map_clusters_out)
+    print(f"Cluster map saved to {map_clusters_out}.")
+else:
+    print("Skipping hotspot mapping (no lat/lon).")
+
+# ----------- Additional analyses you may want to run ----------
+# 1) Compare accident counts during 'poor' weather vs 'clear' weather by hour:
+if weather_col:
+    df_work['is_bad_weather'] = df_work['weather_clean'].str.contains('rain|snow|fog|ice|storm|hail', regex=True, na=False)
+    summary = pd.crosstab(df_work['hour'], df_work['is_bad_weather'])
+    print("Sample hourly comparison (counts in good vs bad weather):")
+    print(summary.head(24))
+# 2) Calculate relative risk (accidents per hour normalized by traffic volume) if traffic volume data exists.
+
+print("Analysis complete. Inspect saved HTML maps in the working directory and generated plots.")
