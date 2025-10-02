@@ -1,0 +1,18 @@
+pip install pandas matplotlib
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+file_path = "API_SP.POP.TOTL_DS2_en_csv_v2_38144.csv"
+data = pd.read_csv(file_path, skiprows=4)
+
+world_data = data[data['Country Name'] == 'World'].iloc[:, 4:-1].T
+world_data.columns = ['Population']
+world_data.index = world_data.index.astype(int)  # Convert years to int
+
+plt.figure(figsize=(12, 6))
+plt.bar(world_data.index, world_data['Population'] / 1e9)  # Divide by 1e9 for billions
+plt.xlabel("Year")
+plt.ylabel("Population (Billions)")
+plt.title("World Population Distribution (1960–2024)")
+plt.show()
